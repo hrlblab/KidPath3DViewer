@@ -45,6 +45,13 @@ a{color:#b39ddb}
    <span class="sw" style="background:#d865c8"></span>mesangial</label></div>
  <div class="ctl"><label><input type="checkbox" id="k-cells" checked>
    <span class="sw" style="background:#f0c93c"></span>cells</label></div>
+ <div class="sep"></div>
+ <div class="ctl"><label><input type="checkbox" id="k-slices">
+   <span class="sw" style="background:#9b7fb8"></span>H&amp;E slice planes</label></div>
+ <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">slice α</span>
+   <input type="range" id="sop" min="5" max="100" value="85"></div>
+ <div class="ctl"><label><input type="checkbox" id="stain"> real-stain meshes</label></div>
+ <div class="sep"></div>
  <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">capsule α</span>
    <input type="range" id="op" min="0" max="60" value="14"></div>
  <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">Z cut</span>
@@ -88,15 +95,19 @@ function geo(m){
   g.setIndex(new THREE.BufferAttribute(new Uint32Array(bytes(m.f).buffer),1));
   if (m.n) g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bytes(m.n).buffer),3));
   else g.computeVertexNormals();
+  if (m.c) g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(bytes(m.c)),3,true));
   return g;
 }
+const texLoader = new THREE.TextureLoader();
 
-const datasets = [];     // {label, data, group|null, on}
-const capMats = [], classMeshes = {glom:[],vessels:[],mesangial:[],cells:[]};
+const datasets = [];     // {label, data, baseURL|null, group|null, on}
+const capMats = [], sliceMats = [],
+      classMeshes = {glom:[],vessels:[],mesangial:[],cells:[],slices:[]};
 
 function rebuild(){
   for (const d of datasets) if (d.group){ scene.remove(d.group); d.group=null; }
-  capMats.length=0; for (const k in classMeshes) classMeshes[k].length=0;
+  capMats.length=0; sliceMats.length=0;
+  for (const k in classMeshes) classMeshes[k].length=0;
   const act = datasets.filter(d=>d.on);
   if (!act.length){ render(); return; }
   const built = act.map(d=>{
@@ -123,7 +134,23 @@ function rebuild(){
       const mesh=new THREE.Mesh(cls==='glom'?b.gGlom:geo(b.d.data.meshes[cls]),mat);
       mesh.position.set(xoff-b.ctr.x,-b.ctr.y,-b.ctr.z); mesh.renderOrder=ord;
       mesh.visible=document.getElementById('k-'+cls).checked;
+      mesh.userData.base=mat.color.getHex();
       grp.add(mesh); classMeshes[cls].push(mesh);
+    }
+    const sl=b.d.data.slices;
+    if (sl && b.d.baseURL){
+      const show=document.getElementById('k-slices').checked;
+      const sop=+document.getElementById('sop').value/100;
+      for (const it of sl.items){
+        const tex=texLoader.load(b.d.baseURL+sl.dir+'/'+it.f);
+        tex.flipY=false; tex.colorSpace=THREE.SRGBColorSpace;
+        const mat=new THREE.MeshBasicMaterial({map:tex,transparent:true,opacity:sop,
+          side:THREE.DoubleSide,depthWrite:false,clippingPlanes:[clip]});
+        const pl=new THREE.Mesh(new THREE.PlaneGeometry(sl.w,sl.h),mat);
+        pl.position.set(sl.x0+sl.w/2-b.ctr.x+xoff, sl.y0+sl.h/2-b.ctr.y, it.z-b.ctr.z);
+        pl.renderOrder=3; pl.visible=show;
+        grp.add(pl); classMeshes.slices.push(pl); sliceMats.push(mat);
+      }
     }
     const cells=b.d.data.cells;
     if (cells && cells.n){
@@ -156,15 +183,26 @@ function refreshSetList(){
     el.appendChild(div);
   });
 }
-function addDataset(label,data,on){
-  datasets.push({label,data,group:null,on});
+function addDataset(label,data,on,baseURL){
+  datasets.push({label,data,baseURL:baseURL||null,group:null,on});
   refreshSetList(); rebuild();
 }
 
 // controls
-for (const k of ['glom','vessels','mesangial','cells'])
+for (const k of ['glom','vessels','mesangial','cells','slices'])
   document.getElementById('k-'+k).onchange=e=>classMeshes[k].forEach(m=>m.visible=e.target.checked);
 document.getElementById('op').oninput=e=>capMats.forEach(m=>m.opacity=e.target.value/100);
+document.getElementById('sop').oninput=e=>sliceMats.forEach(m=>m.opacity=e.target.value/100);
+document.getElementById('stain').onchange=e=>{
+  const on=e.target.checked;
+  for (const k of ['glom','vessels','mesangial'])
+    for (const mesh of classMeshes[k]){
+      if (!mesh.geometry.getAttribute('color')) continue;
+      mesh.material.vertexColors=on;
+      mesh.material.color.set(on?0xffffff:mesh.userData.base);
+      mesh.material.needsUpdate=true;
+    }
+};
 document.getElementById('clip').oninput=e=>{
   const t=e.target.value/100, [a,b]=window._zlim||[-50,50];
   clip.constant=(t>=1)?1e6:(a+t*(b-a));
@@ -187,7 +225,7 @@ addEventListener('drop',async e=>{
 try{
   const idx=await (await fetch('data/index.json')).json();
   for (const it of idx)
-    addDataset(it.label, await (await fetch('data/'+it.file)).json(), true);
+    addDataset(it.label, await (await fetch('data/'+it.file)).json(), true, 'data/');
 }catch(e){ /* no bundled data; drag & drop still works */ }
 
 function resize(){ renderer.setSize(innerWidth,innerHeight);

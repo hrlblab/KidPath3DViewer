@@ -4,7 +4,10 @@ Interactive 3D reconstruction viewer for glomeruli segmented on serial kidney
 sections. Pure static HTML + [three.js](https://threejs.org) — no install, no
 server: open the page, rotate/zoom the models, toggle structures
 (capsule / capillary loops / mesangium / nuclei), slide a Z cut plane, or drag
-& drop your own `meshes.json` to view it.
+& drop your own `meshes.json` to view it. Two ways to see the real histology
+in 3D: **H&E slice planes** (registered, ball-masked patches placed at their
+true z positions) and **real-stain meshes** (per-vertex colours sampled from
+the nearest registered section).
 
 **Live demo**: enable GitHub Pages on this repo (Settings → Pages → Deploy from
 branch → `main` / root), then open `https://<user>.github.io/<repo>/`.
@@ -27,13 +30,17 @@ base64-encoded little-endian arrays):
     "vessels":   { "...": "same; 'v' may instead be plain float32 without lo/scale" },
     "mesangial": { }
   },
-  "cells":  { "p": "<f32 xyz um>", "r": "<f32 radius um>", "n": 123 }
+  "cells":  { "p": "<f32 xyz um>", "r": "<f32 radius um>", "n": 123 },
+  "slices": { "dir": "tex_g1", "x0": 0, "y0": 0, "w": 180, "h": 175,
+              "items": [ { "f": "sec11.webp", "z": 1.0 } ] }
 }
 ```
 
-Coordinates are micrometres. `meshes.glom` is required; other classes and
-`cells` are optional. Normals (`"n"` inside a mesh) are optional — computed in
-the browser when absent.
+Coordinates are micrometres. `meshes.glom` is required; other classes,
+`cells` and `slices` are optional. Normals (`"n"`) are computed in the browser
+when absent; per-vertex colours (`"c"`, u8 RGB) enable the real-stain mode.
+`slices` textures are RGBA images served relative to the JSON (works for
+bundled data; drag & drop loads meshes only).
 
 ## Reconstruction pipeline (`pipeline/`)
 
