@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glom3D Viewer</title>
+<style>
+:root{--bg:#101114;--panel:#1b1d22ee;--ink:#e8e4da;--sub:#9a948a;--line:#33363d}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,"Noto Sans SC",sans-serif;overflow:hidden}
+#c{position:fixed;inset:0;display:block}
+.panel{position:fixed;top:12px;left:12px;z-index:3;background:var(--panel);
+  border:1px solid var(--line);border-radius:12px;padding:14px 16px;
+  max-width:min(320px,calc(100vw - 32px));max-height:calc(100vh - 60px);overflow:auto;
+  backdrop-filter:blur(6px)}
+.panel h1{font-size:16px;margin:0 0 2px}
+.panel .sub{font-size:12px;color:var(--sub);line-height:1.5;margin-bottom:10px}
+.ctl{display:flex;align-items:center;gap:8px;font-size:13px;margin:7px 0}
+.sw{width:12px;height:12px;border-radius:3px;flex:none}
+input[type=range]{flex:1;accent-color:#b39ddb}
+label{display:flex;align-items:center;gap:8px;cursor:pointer}
+.sep{border-top:1px solid var(--line);margin:9px 0}
+#sets label{font-weight:600}
+.hint{position:fixed;bottom:10px;left:0;right:0;text-align:center;font-size:12px;
+  color:var(--sub);z-index:3;pointer-events:none}
+#drop{position:fixed;inset:0;z-index:8;display:none;place-items:center;
+  background:#000a;border:3px dashed #b39ddb;color:#fff;font-size:20px}
+a{color:#b39ddb}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+ <h1>Glom3D Viewer</h1>
+ <div class="sub">Serial-section glomerulus reconstructions.
+   Drag &amp; drop your own <code>meshes.json</code> anywhere to add it.
+   <a href="https://github.com/" id="repo-link" style="display:none">repo</a></div>
+ <div id="sets"></div>
+ <div class="sep"></div>
+ <div class="ctl"><label><input type="checkbox" id="k-glom" checked>
+   <span class="sw" style="background:#c9a15a"></span>glom capsule</label></div>
+ <div class="ctl"><label><input type="checkbox" id="k-vessels" checked>
+   <span class="sw" style="background:#4fbd82"></span>vessels</label></div>
+ <div class="ctl"><label><input type="checkbox" id="k-mesangial" checked>
+   <span class="sw" style="background:#d865c8"></span>mesangial</label></div>
+ <div class="ctl"><label><input type="checkbox" id="k-cells" checked>
+   <span class="sw" style="background:#f0c93c"></span>cells</label></div>
+ <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">capsule α</span>
+   <input type="range" id="op" min="0" max="60" value="14"></div>
+ <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">Z cut</span>
+   <input type="range" id="clip" min="0" max="100" value="100"></div>
+ <div class="ctl"><label><input type="checkbox" id="spin" checked>auto-rotate</label></div>
+</div>
+<div class="hint">drag = rotate · wheel/pinch = zoom · right-drag = pan · drop a JSON to load</div>
+<div id="drop">drop meshes JSON to load</div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+const bytes = s => Uint8Array.from(atob(s), c=>c.charCodeAt(0));
+const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.localClippingEnabled = true;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x101114);
+const cam = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 1, 8000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x303040, 1.1));
+const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(1,1,1.5); scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0x8899ff, 0.5); dl2.position.set(-1,-0.5,-1); scene.add(dl2);
+const clip = new THREE.Plane(new THREE.Vector3(0,0,-1), 1e6);
+const controls = new OrbitControls(cam, renderer.domElement);
+controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 1.0;
+
+function geo(m){
+  const g = new THREE.BufferGeometry();
+  let v;
+  if (m.lo){ // quantised uint16
+    const q = new Uint16Array(bytes(m.v).buffer);
+    v = new Float32Array(q.length);
+    for (let i=0;i<q.length;i+=3){
+      v[i]=m.lo[0]+q[i]*m.scale[0]; v[i+1]=m.lo[1]+q[i+1]*m.scale[1]; v[i+2]=m.lo[2]+q[i+2]*m.scale[2];
+    }
+  } else v = new Float32Array(bytes(m.v).buffer);   // plain float32
+  g.setAttribute('position', new THREE.BufferAttribute(v,3));
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(bytes(m.f).buffer),1));
+  if (m.n) g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bytes(m.n).buffer),3));
+  else g.computeVertexNormals();
+  return g;
+}
+
+const datasets = [];     // {label, data, group|null, on}
+const capMats = [], classMeshes = {glom:[],vessels:[],mesangial:[],cells:[]};
+
+function rebuild(){
+  for (const d of datasets) if (d.group){ scene.remove(d.group); d.group=null; }
+  capMats.length=0; for (const k in classMeshes) classMeshes[k].length=0;
+  const act = datasets.filter(d=>d.on);
+  if (!act.length){ render(); return; }
+  const built = act.map(d=>{
+    const gGlom = geo(d.data.meshes.glom);
+    gGlom.computeBoundingBox();
+    const bb=gGlom.boundingBox, ctr=new THREE.Vector3(); bb.getCenter(ctr);
+    return {d, gGlom, ctr, w: bb.max.x-bb.min.x, zmin:bb.min.z-ctr.z, zmax:bb.max.z-ctr.z};
+  });
+  const GAP=50, total=built.reduce((a,b)=>a+b.w,0)+GAP*(built.length-1);
+  let cursor=-total/2, zlo=1e9, zhi=-1e9;
+  for (const b of built){
+    const xoff = cursor + b.w/2; cursor += b.w+GAP;
+    zlo=Math.min(zlo,b.zmin); zhi=Math.max(zhi,b.zmax);
+    const grp = new THREE.Group();
+    const matGlom = new THREE.MeshPhysicalMaterial({color:0xc9a15a,transparent:true,
+      opacity:+document.getElementById('op').value/100,roughness:0.6,side:THREE.DoubleSide,
+      depthWrite:false,clippingPlanes:[clip]});
+    capMats.push(matGlom);
+    const defs=[['vessels',new THREE.MeshStandardMaterial({color:0x4fbd82,roughness:0.45,clippingPlanes:[clip]}),0],
+                ['mesangial',new THREE.MeshStandardMaterial({color:0xd865c8,roughness:0.6,transparent:true,opacity:0.75,clippingPlanes:[clip]}),1],
+                ['glom',matGlom,2]];
+    for (const [cls,mat,ord] of defs){
+      if(!b.d.data.meshes[cls]) continue;
+      const mesh=new THREE.Mesh(cls==='glom'?b.gGlom:geo(b.d.data.meshes[cls]),mat);
+      mesh.position.set(xoff-b.ctr.x,-b.ctr.y,-b.ctr.z); mesh.renderOrder=ord;
+      mesh.visible=document.getElementById('k-'+cls).checked;
+      grp.add(mesh); classMeshes[cls].push(mesh);
+    }
+    const cells=b.d.data.cells;
+    if (cells && cells.n){
+      const cp=new Float32Array(bytes(cells.p).buffer), cr=new Float32Array(bytes(cells.r).buffer);
+      const inst=new THREE.InstancedMesh(new THREE.SphereGeometry(1,12,10),
+        new THREE.MeshStandardMaterial({color:0xf0c93c,roughness:0.5,clippingPlanes:[clip]}),cells.n);
+      const M=new THREE.Matrix4();
+      for(let i=0;i<cells.n;i++){
+        M.makeScale(cr[i],cr[i],cr[i]);
+        M.setPosition(cp[3*i]+xoff-b.ctr.x,cp[3*i+1]-b.ctr.y,cp[3*i+2]-b.ctr.z);
+        inst.setMatrixAt(i,M);
+      }
+      inst.visible=document.getElementById('k-cells').checked;
+      grp.add(inst); classMeshes.cells.push(inst);
+    }
+    scene.add(grp); b.d.group=grp;
+  }
+  clip.constant=1e6; document.getElementById('clip').value=100;
+  window._zlim=[zlo,zhi];
+  const R=Math.max(total,120)*1.35;
+  cam.position.set(0,-R*0.75,R*0.55); controls.target.set(0,0,0);
+}
+
+function refreshSetList(){
+  const el=document.getElementById('sets'); el.innerHTML='';
+  datasets.forEach((d,i)=>{
+    const div=document.createElement('div'); div.className='ctl';
+    div.innerHTML=`<label><input type="checkbox" ${d.on?'checked':''}> ${d.label}</label>`;
+    div.querySelector('input').onchange=e=>{d.on=e.target.checked; rebuild();};
+    el.appendChild(div);
+  });
+}
+function addDataset(label,data,on){
+  datasets.push({label,data,group:null,on});
+  refreshSetList(); rebuild();
+}
+
+// controls
+for (const k of ['glom','vessels','mesangial','cells'])
+  document.getElementById('k-'+k).onchange=e=>classMeshes[k].forEach(m=>m.visible=e.target.checked);
+document.getElementById('op').oninput=e=>capMats.forEach(m=>m.opacity=e.target.value/100);
+document.getElementById('clip').oninput=e=>{
+  const t=e.target.value/100, [a,b]=window._zlim||[-50,50];
+  clip.constant=(t>=1)?1e6:(a+t*(b-a));
+};
+document.getElementById('spin').onchange=e=>{controls.autoRotate=e.target.checked;};
+
+// drag & drop
+const drop=document.getElementById('drop');
+addEventListener('dragover',e=>{e.preventDefault();drop.style.display='grid';});
+drop.addEventListener('dragleave',()=>drop.style.display='none');
+addEventListener('drop',async e=>{
+  e.preventDefault(); drop.style.display='none';
+  for (const f of e.dataTransfer.files){
+    try{ addDataset(f.name.replace('.json',''), JSON.parse(await f.text()), true); }
+    catch(err){ alert('not a valid meshes JSON: '+f.name); }
+  }
+});
+
+// bundled demo data
+try{
+  const idx=await (await fetch('data/index.json')).json();
+  for (const it of idx)
+    addDataset(it.label, await (await fetch('data/'+it.file)).json(), true);
+}catch(e){ /* no bundled data; drag & drop still works */ }
+
+function resize(){ renderer.setSize(innerWidth,innerHeight);
+  cam.aspect=innerWidth/innerHeight; cam.updateProjectionMatrix(); }
+addEventListener('resize',resize); resize();
+function render(){ renderer.render(scene,cam); }
+renderer.setAnimationLoop(()=>{controls.update(); render();});
+</script>
+</body>
+</html>
