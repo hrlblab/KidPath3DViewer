@@ -5,9 +5,12 @@ sections. Pure static HTML + [three.js](https://threejs.org) — no install, no
 server: open the page, rotate/zoom the models, toggle structures
 (capsule / capillary loops / mesangium / nuclei), slide a Z cut plane, or drag
 & drop your own `meshes.json` to view it. Two ways to see the real histology
-in 3D: **H&E slice planes** (registered, ball-masked patches placed at their
-true z positions) and **real-stain meshes** (per-vertex colours sampled from
-the nearest registered section).
+in 3D: **H&E slice planes** (registered, ball-masked patches at their true z
+positions, densified to 1 µm by optical-flow morphing), **real-stain meshes**
+(per-vertex colours sampled from the nearest registered section), and **RGB
+volume rendering** (raycast through a near-isotropic 1 µm RGBA voxel volume).
+Flow-interpolated frames and voxels between real sections are synthesized for
+rendering only — compute quantitative statistics on the original sections.
 
 **Live demo**: enable GitHub Pages on this repo (Settings → Pages → Deploy from
 branch → `main` / root), then open `https://<user>.github.io/<repo>/`.

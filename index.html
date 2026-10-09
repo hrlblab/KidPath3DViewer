@@ -51,6 +51,10 @@ a{color:#b39ddb}
  <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">slice α</span>
    <input type="range" id="sop" min="5" max="100" value="85"></div>
  <div class="ctl"><label><input type="checkbox" id="stain"> real-stain meshes</label></div>
+ <div class="ctl"><label><input type="checkbox" id="k-volume">
+   <span class="sw" style="background:#c0768a"></span>RGB volume rendering</label></div>
+ <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">density</span>
+   <input type="range" id="vgain" min="10" max="300" value="100"></div>
  <div class="sep"></div>
  <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">capsule α</span>
    <input type="range" id="op" min="0" max="60" value="14"></div>
@@ -101,12 +105,77 @@ function geo(m){
 const texLoader = new THREE.TextureLoader();
 
 const datasets = [];     // {label, data, baseURL|null, group|null, on}
-const capMats = [], sliceMats = [],
-      classMeshes = {glom:[],vessels:[],mesangial:[],cells:[],slices:[]};
+const capMats = [], sliceMats = [], volMats = [],
+      classMeshes = {glom:[],vessels:[],mesangial:[],cells:[],slices:[],volume:[]};
+
+const volVert = `
+out vec3 vOrigin; out vec3 vDir;
+void main(){
+  vOrigin = (inverse(modelMatrix) * vec4(cameraPosition, 1.)).xyz;
+  vDir = position - vOrigin;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.);
+}`;
+const volFrag = `
+precision highp float; precision highp sampler3D;
+in vec3 vOrigin; in vec3 vDir;
+uniform sampler3D uTex; uniform vec3 uSize; uniform float uGain; uniform float uClipZ;
+out vec4 outColor;
+vec2 hitBox(vec3 o, vec3 d){
+  vec3 inv = 1. / d;
+  vec3 t0 = (-0.5 * uSize - o) * inv, t1 = (0.5 * uSize - o) * inv;
+  vec3 tmin = min(t0, t1), tmax = max(t0, t1);
+  return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+}
+void main(){
+  vec3 dir = normalize(vDir);
+  vec2 t = hitBox(vOrigin, dir);
+  if (t.x > t.y) discard;
+  t.x = max(t.x, 0.);
+  float stepLen = max(uSize.x, max(uSize.y, uSize.z)) / 300.;
+  vec4 acc = vec4(0.);
+  for (int i = 0; i < 420; i++){
+    float tt = t.x + float(i) * stepLen;
+    if (tt > t.y || acc.a > 0.98) break;
+    vec3 q = vOrigin + tt * dir;
+    if (q.z > uClipZ) continue;
+    vec4 s = texture(uTex, (q + 0.5 * uSize) / uSize);
+    float a = clamp(s.a * uGain * stepLen * 0.12, 0., 1.);
+    acc.rgb += (1. - acc.a) * a * s.rgb;
+    acc.a   += (1. - acc.a) * a;
+  }
+  if (acc.a < 0.01) discard;
+  outColor = vec4(acc.rgb / max(acc.a, 1e-4), acc.a);
+}`;
+
+async function loadVolumeTexture(vol, baseURL){
+  const img = await new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = rej;
+    im.src = baseURL + vol.atlas;
+  });
+  const cv = document.createElement('canvas');
+  cv.width = img.width; cv.height = img.height;
+  const cx = cv.getContext('2d', {willReadFrequently: true});
+  cx.drawImage(img, 0, 0);
+  const px = cx.getImageData(0, 0, img.width, img.height).data;
+  const {nx, ny, nz, cols} = vol;
+  const data = new Uint8Array(nx * ny * nz * 4);
+  for (let z = 0; z < nz; z++){
+    const ri = (z / cols) | 0, ci = z % cols;
+    for (let y = 0; y < ny; y++){
+      const src = ((ri * ny + y) * img.width + ci * nx) * 4;
+      data.set(px.subarray(src, src + nx * 4), (z * ny + y) * nx * 4);
+    }
+  }
+  const tex = new THREE.Data3DTexture(data, nx, ny, nz);
+  tex.format = THREE.RGBAFormat;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.unpackAlignment = 1; tex.needsUpdate = true;
+  return tex;
+}
 
 function rebuild(){
   for (const d of datasets) if (d.group){ scene.remove(d.group); d.group=null; }
-  capMats.length=0; sliceMats.length=0;
+  capMats.length=0; sliceMats.length=0; volMats.length=0;
   for (const k in classMeshes) classMeshes[k].length=0;
   const act = datasets.filter(d=>d.on);
   if (!act.length){ render(); return; }
@@ -166,6 +235,26 @@ function rebuild(){
       inst.visible=document.getElementById('k-cells').checked;
       grp.add(inst); classMeshes.cells.push(inst);
     }
+    const vol=b.d.data.volume;
+    if (vol && b.d.baseURL){
+      const grpRef=grp, ctr=b.ctr, xo=xoff;
+      loadVolumeTexture(vol, b.d.baseURL).then(tex=>{
+        if (b.d.group!==grpRef) return;    // rebuilt meanwhile
+        const d3=vol.nz*vol.dz;
+        const mat=new THREE.ShaderMaterial({glslVersion:THREE.GLSL3,
+          vertexShader:volVert, fragmentShader:volFrag, transparent:true,
+          side:THREE.BackSide, depthWrite:false,
+          uniforms:{uTex:{value:tex}, uSize:{value:new THREE.Vector3(vol.w,vol.h,d3)},
+                    uGain:{value:+document.getElementById('vgain').value/50},
+                    uClipZ:{value:1e6}}});
+        const box=new THREE.Mesh(new THREE.BoxGeometry(vol.w,vol.h,d3), mat);
+        box.position.set(vol.x0+vol.w/2-ctr.x+xo, vol.y0+vol.h/2-ctr.y,
+                         vol.z0+(vol.nz-1)*vol.dz/2-ctr.z);
+        box.renderOrder=4;
+        box.visible=document.getElementById('k-volume').checked;
+        grpRef.add(box); classMeshes.volume.push(box); volMats.push(mat);
+      });
+    }
     scene.add(grp); b.d.group=grp;
   }
   clip.constant=1e6; document.getElementById('clip').value=100;
@@ -189,8 +278,9 @@ function addDataset(label,data,on,baseURL){
 }
 
 // controls
-for (const k of ['glom','vessels','mesangial','cells','slices'])
+for (const k of ['glom','vessels','mesangial','cells','slices','volume'])
   document.getElementById('k-'+k).onchange=e=>classMeshes[k].forEach(m=>m.visible=e.target.checked);
+document.getElementById('vgain').oninput=e=>volMats.forEach(m=>m.uniforms.uGain.value=e.target.value/50);
 document.getElementById('op').oninput=e=>capMats.forEach(m=>m.opacity=e.target.value/100);
 document.getElementById('sop').oninput=e=>sliceMats.forEach(m=>m.opacity=e.target.value/100);
 document.getElementById('stain').onchange=e=>{
@@ -232,7 +322,12 @@ function resize(){ renderer.setSize(innerWidth,innerHeight);
   cam.aspect=innerWidth/innerHeight; cam.updateProjectionMatrix(); }
 addEventListener('resize',resize); resize();
 function render(){ renderer.render(scene,cam); }
-renderer.setAnimationLoop(()=>{controls.update(); render();});
+renderer.setAnimationLoop(()=>{
+  controls.update();
+  for (const m of classMeshes.volume)
+    m.material.uniforms.uClipZ.value = clip.constant - m.position.z;
+  render();
+});
 </script>
 </body>
 </html>
