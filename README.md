@@ -53,7 +53,12 @@ coordinates, one file per section) to `meshes.json`:
 1. `reconstruct3d_g1.py` — data loading, rasterisation, SDF helpers (library).
 2. `reconstruct3d_g1_v2.py` — ball-centred ECC rigid registration
    (translation + rotation) + Savitzky-Golay trajectory smoothing.
-3. `reconstruct3d_g1_v3.py` / `reconstruct3d_ball.py` — final recipe:
+3. `registration_v4.py` — the registration used by the final exports: v2 as
+   initialisation, then a bad-pair repair pass (pairs whose masked NCC is low
+   get a translation grid search applied to the downstream chain) and a gated
+   groupwise refinement (corrections only accepted when they provably raise
+   the masked NCC).
+4. `reconstruct3d_g1_v3.py` / `reconstruct3d_ball.py` — final recipe:
    registration → signed-distance-field z-interpolation (3 µm → 1 µm, removes
    stair-step artefacts without fattening thin structures) → marching cubes →
    quantised JSON export.

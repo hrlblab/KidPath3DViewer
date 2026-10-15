@@ -20,46 +20,22 @@ from pathlib import Path
 import cv2
 import numpy as np
 import openslide
-from scipy.signal import savgol_filter
 
-from reconstruct3d_g1 import (DS, MPP, OFF, OUTDIR, S, ZUM, compose,
-                              gray_patch, load_sections, rasterise, sdf)
-from reconstruct3d_g1_v2 import local_ecc
+from reconstruct3d_g1 import (DS, MPP, OUTDIR, S, ZUM, compose,
+                              load_sections, rasterise, sdf)
 from reconstruct3d_g1_v3 import GRID, VXY, sdf_upsample_z
+from registration_v4 import compute_warps
 
 G = int(sys.argv[1])
 REPO = Path("/data3/zhuy39/GLomSeg/glom3d-viewer/data")
 TEXDIR = REPO / f"tex_g{G}"
 NEW = Path("/data3/zhuy39/GLomSeg/new data/22-184")
 
-# ---- registration (identical to reconstruct3d_textured) ----
+# ---- registration (identical to reconstruct3d_textured: v4 groupwise) ----
 secs = load_sections(G)
 order = sorted(secs)
-slides, warps = {}, {}
-base = np.array([[1, 0, OFF], [0, 1, OFF]], np.float32)
-for i, s in enumerate(order):
-    if i == 0:
-        warps[s] = base
-        continue
-    prev = order[i - 1]
-    pinfo, info = secs[prev], secs[s]
-    p_c = pinfo["host"].mean(0) - np.array(pinfo["origin"])
-    c_c = info["host"].mean(0) - np.array(info["origin"])
-    W, ok = local_ecc(gray_patch(slides, pinfo), gray_patch(slides, info), p_c, c_c)
-    if not ok:
-        W = np.array([[1, 0, p_c[0] - c_c[0]], [0, 1, p_c[1] - c_c[1]]], np.float32)
-    warps[s] = compose(warps[prev], W)
-cents = []
-for s in order:
-    W3 = np.vstack([warps[s], [0, 0, 1]])
-    c = secs[s]["host"].mean(0) - np.array(secs[s]["origin"])
-    cents.append((W3 @ [c[0], c[1], 1.0])[:2])
-cents = np.array(cents)
-win = min(9, len(order) - (1 - len(order) % 2))
-sm = np.column_stack([savgol_filter(cents[:, k], win, 2) for k in (0, 1)])
-for i, s in enumerate(order):
-    d = cents[i] - sm[i]
-    warps[s] = compose(np.array([[1, 0, -d[0]], [0, 1, -d[1]]], np.float32), warps[s])
+slides = {}
+warps = compute_warps(secs, order, slides)
 
 z0 = order[0]
 SC = np.array([[1 / DS, 0, 0], [0, 1 / DS, 0]], np.float32)
