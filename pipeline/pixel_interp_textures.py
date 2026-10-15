@@ -13,6 +13,7 @@ dataset JSON's slices.items. Also writes recon3d/cmp_pixel_interp_g{N}.jpg
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -90,6 +91,24 @@ for z in range(nz):
     gstack[z] = ((1 - t) * sdf(gstack[lo]) + t * sdf(gstack[hi]) > 0).astype(np.uint8)
 gfine = sdf_upsample_z(gstack, 3)          # index f = z*3
 
+# sphere-cap closure beyond the end sections (volume atlas only): model the
+# ball as locally spherical (R = max inscribed radius over the stack) and
+# shrink the end cross-section along a sphere-cap profile until it closes,
+# instead of cutting the volume flat at the first/last section.
+R = max(float(sdf(gstack[z]).max()) for z in have)
+
+
+def cap_frames(end_mask):
+    d = sdf(end_mask.astype(np.uint8))
+    r_end = max(float(d.max()), 1.0)
+    h = R - math.sqrt(max(R * R - r_end * r_end, 0.0))
+    n = max(int(math.ceil(h)), 2)
+    out = []
+    for k in range(1, n + 1):
+        rk = math.sqrt(max(R * R - (R - h + k * h / n) ** 2, 0.0))
+        out.append((d > (r_end - rk)).astype(np.uint8))
+    return out  # nearest end first, closes to a point
+
 # crop region (identical formula to reconstruct3d_textured)
 ys, xs = np.where(gstack.any(0))
 M = 20
@@ -144,22 +163,34 @@ items.sort(key=lambda d: d["z"])
 print(f"g{G}: {len(have)} real + {n_interp} interpolated frames")
 
 # ---- RGBA voxel atlas for volume rendering (1 um near-isotropic) ----
+# Atlas alpha is the undilated mask (slice textures keep their feathered
+# alpha): the solid-surface iso level then sits on the true boundary.
+def vol_alpha(mask):
+    a = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), 1.2)
+    return (np.clip(a[r0:r1, c0:c1], 0, 1) * 255).astype(np.uint8)
+
+
 maxf0 = max(fine_rgb)
-nzf = maxf0 + 1
+lo_caps = cap_frames(gfine[0])
+hi_caps = cap_frames(gfine[maxf0])
+frames = [(rgb[have[0]], m) for m in reversed(lo_caps)]
+frames += [(fine_rgb[f], gfine[f]) for f in range(maxf0 + 1)]
+frames += [(rgb[have[-1]], m) for m in hi_caps]
+nzf = len(frames)
 tw, th = c1 - c0, r1 - r0
 cols = int(np.ceil(np.sqrt(nzf)))
 rows = int(np.ceil(nzf / cols))
 atlas = np.zeros((rows * th, cols * tw, 4), np.uint8)
-for f in range(nzf):
+for f, (im, m) in enumerate(frames):
     ri, ci = divmod(f, cols)
     atlas[ri * th:(ri + 1) * th, ci * tw:(ci + 1) * tw] = np.dstack(
-        [fine_rgb[f][r0:r1, c0:c1], alpha_of(f)])
+        [im[r0:r1, c0:c1], vol_alpha(m)])
 cv2.imwrite(str(REPO / f"vol_g{G}.webp"), atlas, [cv2.IMWRITE_WEBP_QUALITY, 90])
 vol_meta = dict(atlas=f"vol_g{G}.webp", nx=int(tw), ny=int(th), nz=int(nzf), cols=int(cols),
                 x0=round(c0 * VXY, 3), y0=round(r0 * VXY, 3),
                 w=round(tw * VXY, 3), h=round(th * VXY, 3),
-                z0=round(spz, 3), dz=round(spz, 3))
-print("volume atlas:", atlas.shape, "->", f"vol_g{G}.webp")
+                z0=round(spz - len(lo_caps) * spz, 3), dz=round(spz, 3))
+print(f"volume atlas: {atlas.shape}, caps {len(lo_caps)}+{len(hi_caps)} ->", f"vol_g{G}.webp")
 
 # update dataset json
 jp = REPO / f"glom_22-184_g{G}.json"
