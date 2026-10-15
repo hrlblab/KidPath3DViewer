@@ -53,6 +53,7 @@ a{color:#b39ddb}
  <div class="ctl"><label><input type="checkbox" id="stain"> real-stain meshes</label></div>
  <div class="ctl"><label><input type="checkbox" id="k-volume">
    <span class="sw" style="background:#c0768a"></span>RGB volume rendering</label></div>
+ <div class="ctl"><label><input type="checkbox" id="vsolid" checked> solid-ball shading</label></div>
  <div class="ctl"><span style="font-size:12px;color:var(--sub);width:70px">density</span>
    <input type="range" id="vgain" min="10" max="300" value="100"></div>
  <div class="sep"></div>
@@ -118,7 +119,8 @@ void main(){
 const volFrag = `
 precision highp float; precision highp sampler3D;
 in vec3 vOrigin; in vec3 vDir;
-uniform sampler3D uTex; uniform vec3 uSize; uniform float uGain; uniform float uClipZ;
+uniform sampler3D uTex; uniform vec3 uSize; uniform float uGain;
+uniform float uClipZ; uniform int uMode;
 out vec4 outColor;
 vec2 hitBox(vec3 o, vec3 d){
   vec3 inv = 1. / d;
@@ -126,20 +128,55 @@ vec2 hitBox(vec3 o, vec3 d){
   vec3 tmin = min(t0, t1), tmax = max(t0, t1);
   return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
 }
+float alphaAt(vec3 uv){ return texture(uTex, uv).a; }
 void main(){
   vec3 dir = normalize(vDir);
   vec2 t = hitBox(vOrigin, dir);
   if (t.x > t.y) discard;
   t.x = max(t.x, 0.);
-  float stepLen = max(uSize.x, max(uSize.y, uSize.z)) / 300.;
+  float stepLen = max(uSize.x, max(uSize.y, uSize.z)) / 340.;
+  if (uMode == 1){
+    // solid-surface mode: first hit on the ball mask, gradient-shaded
+    for (int i = 0; i < 480; i++){
+      float tt = t.x + float(i) * stepLen;
+      if (tt > t.y) break;
+      vec3 q = vOrigin + tt * dir;
+      if (q.z > uClipZ) continue;
+      vec3 uv = (q + 0.5 * uSize) / uSize;
+      vec4 s = texture(uTex, uv);
+      if (s.a > 0.5){
+        vec3 n;
+        if (uClipZ - q.z < stepLen * 2.5){
+          n = vec3(0., 0., 1.);              // the cut face
+        } else {
+          vec3 e = 1.5 / vec3(textureSize(uTex, 0));
+          vec3 g = vec3(
+            alphaAt(uv + vec3(e.x,0.,0.)) - alphaAt(uv - vec3(e.x,0.,0.)),
+            alphaAt(uv + vec3(0.,e.y,0.)) - alphaAt(uv - vec3(0.,e.y,0.)),
+            alphaAt(uv + vec3(0.,0.,e.z)) - alphaAt(uv - vec3(0.,0.,e.z))) / uSize;
+          n = -normalize(g + 1e-6);
+        }
+        vec3 L = normalize(vec3(0.45, -0.55, 0.75));
+        float diff = max(dot(n, L), 0.);
+        float head = max(dot(n, -dir), 0.);
+        float rim  = pow(1. - head, 2.5) * 0.18;
+        vec3 col = s.rgb * (0.34 + 0.46 * diff + 0.28 * head) + rim;
+        outColor = vec4(col, 1.);
+        return;
+      }
+    }
+    discard;
+  }
+  // cloud mode: emission-absorption, alpha weighted by stain density
   vec4 acc = vec4(0.);
-  for (int i = 0; i < 420; i++){
+  for (int i = 0; i < 480; i++){
     float tt = t.x + float(i) * stepLen;
     if (tt > t.y || acc.a > 0.98) break;
     vec3 q = vOrigin + tt * dir;
     if (q.z > uClipZ) continue;
     vec4 s = texture(uTex, (q + 0.5 * uSize) / uSize);
-    float a = clamp(s.a * uGain * stepLen * 0.12, 0., 1.);
+    float density = clamp(1.05 - dot(s.rgb, vec3(0.299, 0.587, 0.114)), 0., 1.);
+    float a = clamp(s.a * (0.10 + 1.6 * density) * uGain * stepLen * 0.12, 0., 1.);
     acc.rgb += (1. - acc.a) * a * s.rgb;
     acc.a   += (1. - acc.a) * a;
   }
@@ -246,6 +283,7 @@ function rebuild(){
           side:THREE.BackSide, depthWrite:false,
           uniforms:{uTex:{value:tex}, uSize:{value:new THREE.Vector3(vol.w,vol.h,d3)},
                     uGain:{value:+document.getElementById('vgain').value/50},
+                    uMode:{value:document.getElementById('vsolid').checked?1:0},
                     uClipZ:{value:1e6}}});
         const box=new THREE.Mesh(new THREE.BoxGeometry(vol.w,vol.h,d3), mat);
         box.position.set(vol.x0+vol.w/2-ctr.x+xo, vol.y0+vol.h/2-ctr.y,
@@ -281,6 +319,7 @@ function addDataset(label,data,on,baseURL){
 for (const k of ['glom','vessels','mesangial','cells','slices','volume'])
   document.getElementById('k-'+k).onchange=e=>classMeshes[k].forEach(m=>m.visible=e.target.checked);
 document.getElementById('vgain').oninput=e=>volMats.forEach(m=>m.uniforms.uGain.value=e.target.value/50);
+document.getElementById('vsolid').onchange=e=>volMats.forEach(m=>m.uniforms.uMode.value=e.target.checked?1:0);
 document.getElementById('op').oninput=e=>capMats.forEach(m=>m.opacity=e.target.value/100);
 document.getElementById('sop').oninput=e=>sliceMats.forEach(m=>m.opacity=e.target.value/100);
 document.getElementById('stain').onchange=e=>{
