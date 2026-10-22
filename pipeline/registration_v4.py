@@ -92,45 +92,89 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
         mu, mn = _metric([blur(r) for r in regs], masks)
         print(f"v4 init : NCC mean {mu:.4f}  min {mn:.4f}")
 
-    # ---- bad-pair repair: the chained-ECC fallback pairs can be tens of px
-    # off; grid-search a translation that maximises the masked NCC against the
-    # previous section and apply it to the whole downstream chain. ----
+    # ---- pairwise repair + polish, each correction applied to the whole
+    # downstream chain so inter-pair alignment is preserved. ----
     rb = [blur(r) for r in regs]
-    for i in range(1, len(order)):
-        n0 = pair_ncc(rb, i - 1)
-        if n0 >= 0.15:
-            continue
-        best, bdx, bdy = n0, 0, 0
-        m_prev = masks[i - 1] > 0
-        for step, rng, cx, cy in [(3, 30, 0, 0), (1, 3, None, None)]:
-            if cx is None:
-                cx, cy = bdx, bdy
-            for dy in range(cy - rng, cy + rng + 1, step):
-                for dx in range(cx - rng, cx + rng + 1, step):
-                    M = np.float32([[1, 0, dx], [0, 1, dy]])
-                    g = cv2.warpAffine(rb[i], M, (GRID, GRID), borderValue=245)
-                    mm = cv2.warpAffine(masks[i], M, (GRID, GRID)) > 0
-                    sel = m_prev & mm
-                    if sel.sum() < 100:
-                        continue
-                    v = _ncc(g, rb[i - 1], sel)
-                    if v > best:
-                        best, bdx, bdy = v, dx, dy
-        if best < n0 + 0.05 or (bdx == 0 and bdy == 0):
-            continue
-        if verbose:
-            print(f"  repair pair {order[i - 1]}->{order[i]}: "
-                  f"NCC {n0:.3f} -> {best:.3f}  shift ({bdx},{bdy})px")
-        T = np.array([[1, 0, bdx * DS], [0, 1, bdy * DS]], np.float32)
+
+    def apply_downstream(i, Wg):
+        """Wg: correction in GRID coords for section i and everything after."""
+        T = compose(SCi, compose(Wg, SC))
         for j in range(i, len(order)):
             warps[order[j]] = compose(T, warps[order[j]])
             regs[j], masks[j] = render(order[j])
             rb[j] = blur(regs[j])
+
+    # pass A: translation grid search on EVERY pair, gated on NCC gain.
+    # NCC is evaluated on a FIXED domain (the previous section's ball
+    # interior): a shrinking mask-intersection domain rewards sliding the
+    # ball away until only a high-gradient sliver overlaps.
+    for i in range(1, len(order)):
+        dom = masks[i - 1] > 0
+        n0 = _ncc(rb[i], rb[i - 1], dom)
+        best, bdx, bdy = n0, 0, 0
+
+        def ncc_at(dx, dy):
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            g = cv2.warpAffine(rb[i], M, (GRID, GRID), borderValue=245)
+            return _ncc(g, rb[i - 1], dom)
+
+        rng = 24 if n0 < 0.15 else 12
+        for dy in range(-rng, rng + 1, 2):
+            for dx in range(-rng, rng + 1, 2):
+                v = ncc_at(dx, dy)
+                if v > best:
+                    best, bdx, bdy = v, dx, dy
+        # hill-climb +-2 from the coarse optimum (handles optima at the edge)
+        for _ in range(15):
+            better = False
+            for dy in range(bdy - 2, bdy + 3):
+                for dx in range(bdx - 2, bdx + 3):
+                    if dx == bdx and dy == bdy:
+                        continue
+                    v = ncc_at(dx, dy)
+                    if v > best:
+                        best, bdx, bdy, better = v, dx, dy, True
+            if not better:
+                break
+        gate = 0.05 if n0 < 0.15 else 0.03
+        if best < n0 + gate or (bdx == 0 and bdy == 0):
+            continue
+        if verbose:
+            print(f"  repair pair {order[i - 1]}->{order[i]}: "
+                  f"NCC {n0:.3f} -> {best:.3f}  shift ({bdx},{bdy})px")
+        apply_downstream(i, np.float32([[1, 0, bdx], [0, 1, bdy]]))
     if verbose:
         mu, mn = _metric(rb, masks)
         print(f"v4 rep  : NCC mean {mu:.4f}  min {mn:.4f}")
 
+    # pass B: per-pair euclidean ECC polish (adds the rotation the grid search
+    # cannot; gated on NCC gain and small motion)
     K = np.ones((15, 15), np.uint8)
+    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+    for i in range(1, len(order)):
+        dom = masks[i - 1] > 0
+        n0 = _ncc(rb[i], rb[i - 1], dom)
+        W = np.eye(2, 3, dtype=np.float32)
+        try:
+            _, W = cv2.findTransformECC(rb[i - 1], rb[i], W, cv2.MOTION_EUCLIDEAN,
+                                        crit, cv2.dilate(masks[i], K), 5)
+        except cv2.error:
+            continue
+        sh = float(np.hypot(W[0, 2], W[1, 2]))
+        rot = abs(_math.degrees(_math.atan2(W[1, 0], W[0, 0])))
+        if sh > 8 or rot > 4:
+            continue
+        warped = cv2.warpAffine(rb[i], W, (GRID, GRID), borderValue=245)
+        n1 = _ncc(warped, rb[i - 1], dom)
+        if n1 <= n0 + 0.01:
+            continue
+        if verbose:
+            print(f"  polish pair {order[i - 1]}->{order[i]}: "
+                  f"NCC {n0:.3f} -> {n1:.3f}  shift {sh:.1f}px rot {rot:.2f}deg")
+        apply_downstream(i, W)
+    if verbose:
+        mu, mn = _metric(rb, masks)
+        print(f"v4 pw   : NCC mean {mu:.4f}  min {mn:.4f}")
     crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
     for it in range(iters):
         acc, shifts = 0, []
@@ -166,4 +210,9 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
                   f"{np.mean(shifts) if shifts else 0:.2f}px")
         if not acc:
             break
+    if verbose:
+        rb = [blur(r) for r in regs]
+        vals = sorted((pair_ncc(rb, i), order[i], order[i + 1])
+                      for i in range(len(order) - 1))
+        print("v4 worst pairs:", ", ".join(f"{a}->{b}:{v:.3f}" for v, a, b in vals[:4]))
     return warps
