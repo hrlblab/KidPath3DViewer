@@ -210,8 +210,34 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
                   f"{np.mean(shifts) if shifts else 0:.2f}px")
         if not acc:
             break
+
+    # ---- de-drift: the pairwise corrections accumulate into a low-frequency
+    # drift/tilt of the whole stack that serial sections cannot determine
+    # (no global reference per slide).  Subtract the smoothed ball-centroid
+    # trajectory: the ball stays compact and upright, while the pairwise
+    # (high-frequency) alignment is preserved — adjacent sections move by the
+    # smooth path's per-step difference only (<2px).
+    cents = []
+    for i in range(len(order)):
+        ys, xs = np.nonzero(masks[i])
+        cents.append((xs.mean(), ys.mean()))
+    cents = np.array(cents)
+    # linear trend only: removing a straight line perturbs every pair by the
+    # same (total drift / n) — the minimal per-pair disturbance; a smoothed
+    # path would locally undo the repaired pairs.
+    t = np.arange(len(order), dtype=float)
+    A = np.column_stack([t, np.ones_like(t)])
+    smp = A @ np.linalg.lstsq(A, cents, rcond=None)[0]
+    smp -= smp.mean(0)
+    for i, s in enumerate(order):
+        T = np.float32([[1, 0, -smp[i, 0]], [0, 1, -smp[i, 1]]])
+        warps[s] = compose(SCi, compose(T, compose(SC, warps[s])))
+        regs[i], masks[i] = render(s)
     if verbose:
         rb = [blur(r) for r in regs]
+        mu, mn = _metric(rb, masks)
+        print(f"v4 dedrift: removed up to {np.abs(smp).max():.1f}px drift; "
+              f"NCC mean {mu:.4f}  min {mn:.4f}")
         vals = sorted((pair_ncc(rb, i), order[i], order[i + 1])
                       for i in range(len(order) - 1))
         print("v4 worst pairs:", ", ".join(f"{a}->{b}:{v:.3f}" for v, a, b in vals[:4]))
