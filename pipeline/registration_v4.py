@@ -1,12 +1,21 @@
 """v4 registration: v2 (ball-centred local ECC chain + trajectory smoothing)
-as initialisation, then GROUPWISE refinement — every section is re-registered
-(euclidean) against the weighted mean of its +-2 registered neighbours, inside
-the dilated ball mask, iterated to convergence.  This fixes what v2 leaves:
-residual rotation jitter (savgol only smooths translation), accumulated chain
-drift, and the pairs where chained ECC failed and fell back to translation.
+as initialisation, then a doubly-gated pairwise repair:
+
+  for every consecutive pair, a translation grid search (+hill climb) on
+  heavily blurred images; a correction is accepted only when it BOTH raises
+  the texture NCC (fixed domain: previous section's ball interior) AND does
+  not lower the ball-mask IoU by more than 0.02.  Pairs where texture and
+  segmentation disagree by more (wrong-structure texture lock, or a bad
+  polygon/trail at that section) are reported as CONFLICTs and left at the
+  v2 placement — the displayed geometry is the mask stack, so following the
+  texture there would bend the ball.
+
+Finally the linear trend of the ball-centroid trajectory is subtracted
+(accumulated pairwise corrections produce a global tilt that serial sections
+cannot determine).
 
 Exports: compute_warps(secs, order, slides) -> {section: 2x3 warp}
-Prints consecutive-pair NCC (inside the ball) before/after as the metric.
+Prints NCC + IoU metrics and the per-pair repairs/conflicts.
 """
 from __future__ import annotations
 
@@ -77,7 +86,6 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
     # layers), so estimate on heavily blurred images (coarse structures:
     # lumina, capsule) and only ACCEPT a correction that provably improves the
     # masked NCC and stays small (<=10px, <=3deg).  Guaranteed >= v2 quality.
-    import math as _math
 
     def blur(g):
         return cv2.GaussianBlur(g, (0, 0), 3)
@@ -104,13 +112,20 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
             regs[j], masks[j] = render(order[j])
             rb[j] = blur(regs[j])
 
-    # pass A: translation grid search on EVERY pair, gated on NCC gain.
-    # NCC is evaluated on a FIXED domain (the previous section's ball
-    # interior): a shrinking mask-intersection domain rewards sliding the
-    # ball away until only a high-gradient sliver overlaps.
+    def iou(ma, mb):
+        return ((ma > 0) & (mb > 0)).sum() / max(((ma > 0) | (mb > 0)).sum(), 1)
+
+    # pass A: translation grid search on EVERY pair, gated on BOTH texture NCC
+    # gain AND mask IoU (the displayed geometry is the mask stack: a texture
+    # optimum that disagrees with the segmentation by >few px means the match
+    # locked onto the wrong structures or the polygon is bad — following it
+    # bends the ball).  NCC is evaluated on a FIXED domain (the previous
+    # section's ball interior): a shrinking mask-intersection domain rewards
+    # sliding the ball away until only a high-gradient sliver overlaps.
     for i in range(1, len(order)):
         dom = masks[i - 1] > 0
         n0 = _ncc(rb[i], rb[i - 1], dom)
+        iou0 = iou(masks[i - 1], masks[i])
         best, bdx, bdy = n0, 0, 0
 
         def ncc_at(dx, dy):
@@ -139,77 +154,26 @@ def compute_warps(secs, order, slides, iters=3, verbose=True):
         gate = 0.05 if n0 < 0.15 else 0.03
         if best < n0 + gate or (bdx == 0 and bdy == 0):
             continue
+        M = np.float32([[1, 0, bdx], [0, 1, bdy]])
+        m_shift = cv2.warpAffine(masks[i], M, (GRID, GRID))
+        iou1 = iou(masks[i - 1], m_shift)
+        if iou1 < iou0 - 0.02:
+            if verbose:
+                print(f"  CONFLICT pair {order[i - 1]}->{order[i]}: texture wants "
+                      f"({bdx},{bdy})px (NCC {n0:.3f}->{best:.3f}) but mask IoU "
+                      f"{iou0:.3f}->{iou1:.3f} — kept v2 placement; check the "
+                      f"segmentation/trail at these sections")
+            continue
         if verbose:
             print(f"  repair pair {order[i - 1]}->{order[i]}: "
-                  f"NCC {n0:.3f} -> {best:.3f}  shift ({bdx},{bdy})px")
-        apply_downstream(i, np.float32([[1, 0, bdx], [0, 1, bdy]]))
+                  f"NCC {n0:.3f} -> {best:.3f}  IoU {iou0:.3f} -> {iou1:.3f}  "
+                  f"shift ({bdx},{bdy})px")
+        apply_downstream(i, M)
     if verbose:
         mu, mn = _metric(rb, masks)
-        print(f"v4 rep  : NCC mean {mu:.4f}  min {mn:.4f}")
-
-    # pass B: per-pair euclidean ECC polish (adds the rotation the grid search
-    # cannot; gated on NCC gain and small motion)
-    K = np.ones((15, 15), np.uint8)
-    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
-    for i in range(1, len(order)):
-        dom = masks[i - 1] > 0
-        n0 = _ncc(rb[i], rb[i - 1], dom)
-        W = np.eye(2, 3, dtype=np.float32)
-        try:
-            _, W = cv2.findTransformECC(rb[i - 1], rb[i], W, cv2.MOTION_EUCLIDEAN,
-                                        crit, cv2.dilate(masks[i], K), 5)
-        except cv2.error:
-            continue
-        sh = float(np.hypot(W[0, 2], W[1, 2]))
-        rot = abs(_math.degrees(_math.atan2(W[1, 0], W[0, 0])))
-        if sh > 8 or rot > 4:
-            continue
-        warped = cv2.warpAffine(rb[i], W, (GRID, GRID), borderValue=245)
-        n1 = _ncc(warped, rb[i - 1], dom)
-        if n1 <= n0 + 0.01:
-            continue
-        if verbose:
-            print(f"  polish pair {order[i - 1]}->{order[i]}: "
-                  f"NCC {n0:.3f} -> {n1:.3f}  shift {sh:.1f}px rot {rot:.2f}deg")
-        apply_downstream(i, W)
-    if verbose:
-        mu, mn = _metric(rb, masks)
-        print(f"v4 pw   : NCC mean {mu:.4f}  min {mn:.4f}")
-    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
-    for it in range(iters):
-        acc, shifts = 0, []
-        rb = [blur(r) for r in regs]
-        for i, s in enumerate(order):
-            nb = [j for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(order)]
-            wn = np.array([1.0 if abs(j - i) == 1 else 0.5 for j in nb], np.float32)
-            tmpl = (sum(w * rb[j] for w, j in zip(wn, nb)) / wn.sum()).astype(np.float32)
-            mask = cv2.dilate(masks[i], K)
-            W = np.eye(2, 3, dtype=np.float32)
-            try:
-                _, W = cv2.findTransformECC(tmpl, rb[i], W, cv2.MOTION_EUCLIDEAN,
-                                            crit, mask, 5)
-            except cv2.error:
-                continue
-            sh = float(np.hypot(W[0, 2], W[1, 2]))
-            rot = abs(_math.degrees(_math.atan2(W[1, 0], W[0, 0])))
-            if sh > 10 or rot > 3:
-                continue
-            m = mask > 0
-            warped = cv2.warpAffine(rb[i], W, (GRID, GRID), borderValue=245)
-            if _ncc(warped, tmpl, m) <= _ncc(rb[i], tmpl, m) + 1e-4:
-                continue
-            warps[s] = compose(SCi, compose(W, compose(SC, warps[s])))
-            regs[i], masks[i] = render(s)
-            rb[i] = blur(regs[i])
-            acc += 1
-            shifts.append(sh)
-        if verbose:
-            mu, mn = _metric([blur(r) for r in regs], masks)
-            print(f"v4 iter{it + 1}: NCC mean {mu:.4f}  min {mn:.4f}  "
-                  f"accepted {acc}/{len(order)} mean shift "
-                  f"{np.mean(shifts) if shifts else 0:.2f}px")
-        if not acc:
-            break
+        ious = [iou(masks[i], masks[i + 1]) for i in range(len(order) - 1)]
+        print(f"v4 rep  : NCC mean {mu:.4f}  min {mn:.4f}  "
+              f"IoU mean {np.mean(ious):.3f} min {np.min(ious):.3f}")
 
     # ---- de-drift: the pairwise corrections accumulate into a low-frequency
     # drift/tilt of the whole stack that serial sections cannot determine
