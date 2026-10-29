@@ -70,8 +70,8 @@ a{color:#b39ddb}
 <div class="hint">drag = rotate · wheel/pinch = zoom · right-drag = pan · drop a JSON to load</div>
 <div id="drop">drop meshes JSON to load</div>
 <script type="importmap">
-{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+{"imports":{"three":"vendor/three.module.js",
+"three/addons/":"vendor/addons/"}}
 </script>
 <script type="module">
 import * as THREE from 'three';
@@ -369,8 +369,20 @@ addEventListener('drop',async e=>{
   }
 });
 
-// bundled demo data
-try{
+// ?src=<file-or-url>: open any meshes JSON straight from the address bar,
+// e.g. index.html?src=myglom.json — textures resolve relative to the JSON.
+const srcs=new URLSearchParams(location.search).getAll('src');
+for (const u of srcs){
+  try{
+    const j=await (await fetch(u)).json();
+    const base=u.includes('/')?u.slice(0,u.lastIndexOf('/')+1):'';
+    const label=decodeURIComponent(u.split('/').pop().replace(/\.json$/i,''));
+    addDataset(label, j, true, base);
+  }catch(err){ alert('cannot load '+u+': '+err.message); }
+}
+
+// bundled demo data (skipped when ?src= is given)
+if (!srcs.length) try{
   const idx=await (await fetch('data/index.json')).json();
   for (const it of idx)
     addDataset(it.label, await (await fetch('data/'+it.file)).json(), true, 'data/');

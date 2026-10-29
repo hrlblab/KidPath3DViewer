@@ -15,6 +15,18 @@ rendering only — compute quantitative statistics on the original sections.
 **Live demo**: enable GitHub Pages on this repo (Settings → Pages → Deploy from
 branch → `main` / root), then open `https://<user>.github.io/<repo>/`.
 
+**One JSON file → a URL**: put your `meshes.json` next to `index.html` (any
+static hosting, or locally `python3 -m http.server 8000`) and open
+
+```
+http://localhost:8000/?src=meshes.json          # local
+https://<user>.github.io/<repo>/?src=my.json    # hosted — a shareable link
+```
+
+`?src=` accepts a relative path or a full URL (CORS permitting) and can be
+repeated to load several datasets. three.js is vendored in `vendor/`, so the
+viewer also works fully offline / inside closed networks.
+
 Bundled demo data: two glomeruli of mouse `22-184`, reconstructed from 24 and
 30 serial H&E sections (3 µm), segmented with YOLO11-L + SAM2.1 and
 registered/interpolated with the pipeline below.
@@ -54,10 +66,10 @@ coordinates, one file per section) to `meshes.json`:
 2. `reconstruct3d_g1_v2.py` — ball-centred ECC rigid registration
    (translation + rotation) + Savitzky-Golay trajectory smoothing.
 3. `registration_v4.py` — the registration used by the final exports: v2 as
-   initialisation, then a bad-pair repair pass (pairs whose masked NCC is low
-   get a translation grid search applied to the downstream chain) and a gated
-   groupwise refinement (corrections only accepted when they provably raise
-   the masked NCC).
+   initialisation, then a doubly-gated pairwise repair (per-pair translation
+   grid search, accepted only when it raises the texture NCC **and** keeps the
+   mask IoU; conflicting pairs are reported and left untouched), finally a
+   linear de-tilt of the centroid trajectory.
 4. `reconstruct3d_g1_v3.py` / `reconstruct3d_ball.py` — final recipe:
    registration → signed-distance-field z-interpolation (3 µm → 1 µm, removes
    stair-step artefacts without fattening thin structures) → marching cubes →
@@ -79,8 +91,12 @@ computed on the original sections.
 ## 中文说明
 
 交互式肾小球三维重建查看器:纯静态网页,打开即用。鼠标拖动旋转、滚轮缩放、
-右键平移;可逐类显隐(外膜/血管袢/系膜/细胞核)、调外膜透明度、Z 向剖切;
+右键平移;可逐类显隐(外膜/血管袢/系膜/细胞核)、调外膜透明度、X/Y/Z 向剖切;
 把你自己生成的 `meshes.json` 拖进页面即可加载(格式见上)。
+**一个 JSON 出网址**:把 `meshes.json` 放到 `index.html` 旁边,本地
+`python3 -m http.server 8000` 后打开 `http://localhost:8000/?src=meshes.json`;
+部署到 GitHub Pages 等静态托管后,`…/?src=文件名.json` 就是可分享的链接。
+three.js 已内置于 `vendor/`,离线或内网环境可直接使用。
 重建管线:以球为中心的 ECC 刚体配准 → 轨迹平滑 → SDF 层间插值(3µm→1µm)
 → marching cubes。管线脚本在 `pipeline/`,需按自己的数据改文件头部的路径与
 像素尺寸/切片厚度常量。
