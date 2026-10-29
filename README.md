@@ -27,9 +27,12 @@ https://<user>.github.io/<repo>/?src=my.json    # hosted — a shareable link
 repeated to load several datasets. three.js is vendored in `vendor/`, so the
 viewer also works fully offline / inside closed networks.
 
-Bundled demo data: two glomeruli of mouse `22-184`, reconstructed from 24 and
-30 serial H&E sections (3 µm), segmented with YOLO11-L + SAM2.1 and
-registered/interpolated with the pipeline below.
+No data is bundled (our tissue data is private): bring your own `meshes.json`
+via `?src=` or drag & drop. The `pipeline/` scripts below produce it from
+serial H&E sections segmented with YOLO11-L + SAM2.1 — in our case 24–30
+sections (3 µm) per glomerulus. A `data/` folder with an `index.json`
+(`[{"label": "...", "file": "xxx.json"}]`) placed next to `index.html` is
+auto-loaded as the dataset list.
 
 ## Use your own data
 
