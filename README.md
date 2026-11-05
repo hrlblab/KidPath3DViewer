@@ -1,9 +1,10 @@
 # KidPath3DViewer
 
-<p align="center"><img src="docs/screenshot.png" width="620"
-alt="Synthetic glomerulus demo: capsule, capillary tuft, mesangium and cells"></p>
+<p align="center"><img src="docs/demo.gif" width="560"
+alt="Synthetic glomerulus demo rotating while cut planes sweep along X, Y and Z"></p>
 <p align="center"><i>Synthetic demo dataset (procedurally generated, no tissue
-data) — try it live with <code>?src=demo/synthetic.json</code>.</i></p>
+data), with the X/Y/Z cut planes sweeping through — try it live with
+<code>?src=demo/synthetic.json</code>.</i></p>
 
 Interactive 3D reconstruction viewer for glomeruli segmented on serial kidney
 sections. Pure static HTML + [three.js](https://threejs.org) — no install, no
